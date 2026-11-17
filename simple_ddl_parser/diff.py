@@ -11,6 +11,7 @@ On top of the report it can generate migration statements for a target
 dialect (currently ``mysql`` and ``mssql``).
 """
 
+import json
 from typing import Dict, List, Optional, Tuple
 
 from simple_ddl_parser.ddl_parser import DDLParser, DDLParserError
@@ -187,6 +188,159 @@ def _diff_columns(old_columns: List[Dict], new_columns: List[Dict]) -> Dict:
     return result
 
 
+def _freeze(value) -> str:
+    """Hashable, stable representation of a comparable definition."""
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _diff_named_definitions(old_items: List[Tuple], new_items: List[Tuple]) -> Dict:
+    """Generic diff over ``(name, comparable_definition, payload)`` triples.
+
+    Named items match by name; a name present on both sides with a different
+    definition lands in ``changed`` (not in removed+added). Unnamed items
+    match by definition only.
+    """
+    result = _empty_change_groups()
+
+    old_named = {item[0]: item[1:] for item in old_items if item[0] is not None}
+    new_named = {item[0]: item[1:] for item in new_items if item[0] is not None}
+
+    for name in new_named.keys() - old_named.keys():
+        result["added"].append(new_named[name][1])
+    for name in old_named.keys() - new_named.keys():
+        result["removed"].append(old_named[name][1])
+    for name in sorted(old_named.keys() & new_named.keys()):
+        old_definition, old_payload = old_named[name]
+        new_definition, new_payload = new_named[name]
+        if _freeze(old_definition) != _freeze(new_definition):
+            result["changed"].append(
+                {"old": old_payload, "new": new_payload}
+            )
+
+    old_unnamed = [item[1:] for item in old_items if item[0] is None]
+    new_unnamed = [item[1:] for item in new_items if item[0] is None]
+    matched = set()
+    for old_definition, old_payload in old_unnamed:
+        for index, (new_definition, _) in enumerate(new_unnamed):
+            if index not in matched and _freeze(old_definition) == _freeze(
+                new_definition
+            ):
+                matched.add(index)
+                break
+        else:
+            result["removed"].append(old_payload)
+    for index, (_, new_payload) in enumerate(new_unnamed):
+        if index not in matched:
+            result["added"].append(new_payload)
+    return result
+
+
+def _index_definition(index: Dict) -> Dict:
+    return {
+        "columns": [
+            _normalize_identifier(column)
+            for column in index.get("columns") or []
+        ],
+        "unique": bool(index.get("unique", False)),
+        "clustered": bool(index.get("clustered", False)),
+    }
+
+
+def _index_payload(index: Dict) -> Dict:
+    return {
+        "index": index.get("index_name"),
+        "definition": {
+            "columns": list(index.get("columns") or []),
+            "unique": bool(index.get("unique", False)),
+            "clustered": bool(index.get("clustered", False)),
+        },
+    }
+
+
+def _diff_indexes(old_indexes: List[Dict], new_indexes: List[Dict]) -> Dict:
+    def to_item(index):
+        name = _normalize_identifier(index.get("index_name"))
+        return (name, _index_definition(index), _index_payload(index))
+
+    return _diff_named_definitions(
+        [to_item(index) for index in old_indexes],
+        [to_item(index) for index in new_indexes],
+    )
+
+
+def _constraint_definition(category: str, item: Dict) -> Dict:
+    if category in ("primary_keys", "uniques"):
+        return {
+            "columns": [
+                _normalize_identifier(column)
+                for column in item.get("columns") or []
+            ]
+        }
+    if category == "checks":
+        return {
+            "statement": " ".join(str(item.get("statement") or "").split()).lower()
+        }
+    if category == "references":
+        local = item.get("name")
+        if isinstance(local, list):
+            local = [_normalize_identifier(column) for column in local]
+        else:
+            local = _normalize_identifier(local)
+        return {
+            "table": _display_name(
+                (
+                    _normalize_identifier(item.get("schema")),
+                    _normalize_identifier(item.get("table")),
+                )
+            ),
+            "columns": [
+                _normalize_identifier(column)
+                for column in item.get("columns") or []
+            ],
+            "name": local,
+            "on_delete": (item.get("on_delete") or "").upper() or None,
+            "on_update": (item.get("on_update") or "").upper() or None,
+        }
+    return {key: value for key, value in item.items() if key != "constraint_name"}
+
+
+def _constraint_payload(category: str, item: Dict) -> Dict:
+    return {
+        "constraint": item.get("constraint_name"),
+        "category": category,
+        "definition": {
+            key: value for key, value in item.items() if key != "constraint_name"
+        },
+    }
+
+
+def _flatten_constraints(table: Dict) -> List[Tuple]:
+    items = []
+    constraints = table.get("constraints") or {}
+    for category in sorted(constraints):
+        entries = constraints[category]
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = _normalize_identifier(entry.get("constraint_name"))
+            items.append(
+                (
+                    (category, name) if name is not None else None,
+                    (category, _constraint_definition(category, entry)),
+                    _constraint_payload(category, entry),
+                )
+            )
+    return items
+
+
+def _diff_constraints(old_table: Dict, new_table: Dict) -> Dict:
+    return _diff_named_definitions(
+        _flatten_constraints(old_table), _flatten_constraints(new_table)
+    )
+
+
 def _diff_table(
     key: Tuple[Optional[str], Optional[str]], old: Dict, new: Dict
 ) -> Optional[Dict]:
@@ -196,8 +350,8 @@ def _diff_table(
         "schema": key[0],
         "table": key[1],
         "columns": _diff_columns(old.get("columns", []), new.get("columns", [])),
-        "indexes": _empty_change_groups(),
-        "constraints": _empty_change_groups(),
+        "indexes": _diff_indexes(old.get("index", []), new.get("index", [])),
+        "constraints": _diff_constraints(old, new),
     }
     has_changes = any(
         table_diff[group][kind]

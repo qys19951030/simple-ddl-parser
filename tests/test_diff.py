@@ -139,3 +139,108 @@ class TestColumnLevel:
         ddl = "CREATE TABLE users (id INT, name VARCHAR(50));"
         report = diff_ddls(ddl, ddl, "mysql")
         assert report["tables"]["changed"] == []
+
+
+def _changed_table(report, table="users"):
+    changed = {t["table"]: t for t in report["tables"]["changed"]}
+    return changed[table]
+
+
+class TestIndexLevel:
+    def test_added_index(self):
+        old = "CREATE TABLE users (id INT, age INT);"
+        new = "CREATE TABLE users (id INT, age INT, INDEX idx_age (age));"
+        indexes = _changed_table(diff_ddls(old, new, "mysql"))["indexes"]
+        assert [i["index"] for i in indexes["added"]] == ["idx_age"]
+        assert indexes["removed"] == []
+        assert indexes["changed"] == []
+
+    def test_removed_index(self):
+        old = "CREATE TABLE users (id INT, age INT, INDEX idx_age (age));"
+        new = "CREATE TABLE users (id INT, age INT);"
+        indexes = _changed_table(diff_ddls(old, new, "mysql"))["indexes"]
+        assert [i["index"] for i in indexes["removed"]] == ["idx_age"]
+
+    def test_changed_index_is_separate_from_add_remove(self):
+        old = "CREATE TABLE users (a INT, b INT, INDEX idx_x (a));"
+        new = "CREATE TABLE users (a INT, b INT, INDEX idx_x (a, b));"
+        indexes = _changed_table(diff_ddls(old, new, "mysql"))["indexes"]
+        assert indexes["added"] == []
+        assert indexes["removed"] == []
+        assert len(indexes["changed"]) == 1
+        change = indexes["changed"][0]
+        assert change["old"]["index"] == "idx_x"
+        assert change["old"]["definition"]["columns"] == ["a"]
+        assert change["new"]["definition"]["columns"] == ["a", "b"]
+
+    def test_unique_flag_change_on_index(self):
+        old = "CREATE TABLE users (a INT, INDEX idx_x (a));"
+        new = "CREATE TABLE users (a INT, UNIQUE INDEX idx_x (a));"
+        indexes = _changed_table(diff_ddls(old, new, "mysql"))["indexes"]
+        assert len(indexes["changed"]) == 1
+        assert indexes["changed"][0]["old"]["definition"]["unique"] is False
+        assert indexes["changed"][0]["new"]["definition"]["unique"] is True
+
+    def test_index_name_case_insensitive(self):
+        old = "CREATE TABLE users (a INT, INDEX IDX_AGE (a));"
+        new = "CREATE TABLE users (a INT, INDEX idx_age (a));"
+        report = diff_ddls(old, new, "mysql")
+        assert report["tables"]["changed"] == []
+
+
+class TestConstraintLevel:
+    def test_added_constraint(self):
+        old = "CREATE TABLE users (id INT, name VARCHAR(50));"
+        new = (
+            "CREATE TABLE users (id INT, name VARCHAR(50), "
+            "CONSTRAINT uq_name UNIQUE (name));"
+        )
+        constraints = _changed_table(diff_ddls(old, new, "mysql"))["constraints"]
+        assert [c["constraint"] for c in constraints["added"]] == ["uq_name"]
+        assert constraints["added"][0]["category"] == "uniques"
+
+    def test_removed_constraint(self):
+        old = (
+            "CREATE TABLE users (id INT, name VARCHAR(50), "
+            "CONSTRAINT uq_name UNIQUE (name));"
+        )
+        new = "CREATE TABLE users (id INT, name VARCHAR(50));"
+        constraints = _changed_table(diff_ddls(old, new, "mysql"))["constraints"]
+        assert [c["constraint"] for c in constraints["removed"]] == ["uq_name"]
+
+    def test_changed_constraint_is_separate_from_add_remove(self):
+        old = (
+            "CREATE TABLE users (a INT, b INT, "
+            "CONSTRAINT uq_ab UNIQUE (a));"
+        )
+        new = (
+            "CREATE TABLE users (a INT, b INT, "
+            "CONSTRAINT uq_ab UNIQUE (a, b));"
+        )
+        constraints = _changed_table(diff_ddls(old, new, "mysql"))["constraints"]
+        assert constraints["added"] == []
+        assert constraints["removed"] == []
+        assert len(constraints["changed"]) == 1
+        change = constraints["changed"][0]
+        assert change["old"]["constraint"] == "uq_ab"
+        assert change["old"]["definition"]["columns"] == ["a"]
+        assert change["new"]["definition"]["columns"] == ["a", "b"]
+
+    def test_check_constraint_change(self):
+        old = "CREATE TABLE users (a INT, CONSTRAINT chk_a CHECK (a > 0));"
+        new = "CREATE TABLE users (a INT, CONSTRAINT chk_a CHECK (a > 10));"
+        constraints = _changed_table(diff_ddls(old, new, "mysql"))["constraints"]
+        assert len(constraints["changed"]) == 1
+        assert constraints["changed"][0]["old"]["category"] == "checks"
+
+    def test_foreign_key_added(self):
+        old = "CREATE TABLE orders (id INT, user_id INT);"
+        new = (
+            "CREATE TABLE orders (id INT, user_id INT, "
+            "CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users (id));"
+        )
+        constraints = _changed_table(diff_ddls(old, new, "mysql"), "orders")[
+            "constraints"
+        ]
+        assert [c["constraint"] for c in constraints["added"]] == ["fk_user"]
+        assert constraints["added"][0]["category"] == "references"
