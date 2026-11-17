@@ -13,6 +13,16 @@ The format is based on Keep a Changelog 1.0.0, and this project adheres to Seman
 ### Fixed
 - None.
 
+## [1.14.0] - 2026-11-18
+### Added
+- New `simple_ddl_parser.diff` module with `diff_ddls(old_ddl, new_ddl, dialect)` that compares two DDL scripts and returns a difference report: added/removed tables, column-level changes (added/removed columns, type/default/nullable changes with old and new values), and index/constraint changes (added/removed/changed, where same-name definition changes are reported separately). The report includes migration statements for the target dialect (`mysql` or `mssql`), ordered as: drop indexes/constraints, alter columns, add columns, add indexes/constraints. `diff_tables(...)` filters the report to a given list of tables, and `diff_table_level(...)` returns only table-level changes. All three are also exported from the package root.
+
+### Changed
+- None.
+
+### Fixed
+- None.
+
 ## [1.13.0] - 2026-03-29
 ### Added
 - None.
@@ -211,7 +221,8 @@ The format is based on Keep a Changelog 1.0.0, and this project adheres to Seman
 
 Older versions are documented in ARCHIVE_CHANGELOG.txt.
 
-[Unreleased]: https://github.com/xnuinside/simple-ddl-parser/compare/1.13.0...HEAD
+[Unreleased]: https://github.com/xnuinside/simple-ddl-parser/compare/1.14.0...HEAD
+[1.14.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.13.0...1.14.0
 [1.13.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.12.0...1.13.0
 [1.12.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.11.0...1.12.0
 [1.11.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.10.0...1.11.0

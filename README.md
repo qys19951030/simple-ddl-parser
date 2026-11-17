@@ -378,6 +378,32 @@ CREATE TABLE [dbo].[TO_Requests](
 
 In output you will have names like 'dbo' and 'TO_Requests', not '[dbo]' and '[TO_Requests]'.
 
+### Diff two DDL scripts
+
+`simple_ddl_parser.diff` compares two DDL texts (an old and a new schema version) and returns a difference report plus migration statements. Both sides are parsed with the regular `DDLParser`, and identifiers are normalized before comparison (quoting characters like backticks, double quotes and square brackets are stripped and names are lower-cased), so spelling differences do not produce false positives.
+
+    from simple_ddl_parser import diff_ddls
+
+    report = diff_ddls(old_ddl, new_ddl, "mysql")
+
+The `dialect` argument is the target dialect for generated migration statements; supported values are `"mysql"` and `"mssql"`.
+
+The report contains:
+
+- `tables`: table-level changes - `added` (new tables, with their column definitions), `removed` and `changed` tables;
+- for each changed table: `columns` (added / removed columns and per-column `type`, `default`, `nullable` changes with old and new values), `indexes` and `constraints` (added / removed / changed - same-name definitions that changed are reported under `changed`, not as remove+add);
+- `statements`: migration statements for the target dialect, ordered as: drop indexes/constraints, alter columns, add columns, add indexes/constraints. For `mssql`, a column type change and a default change are emitted as separate statements; for `mysql` they are combined into one `MODIFY COLUMN` statement.
+
+Two filtered views of the same report are available:
+
+    from simple_ddl_parser import diff_tables, diff_table_level
+
+    # only the listed tables (unknown names are ignored)
+    diff_tables(old_ddl, new_ddl, "mysql", ["users", "orders"])
+
+    # table-level changes only (added / removed / changed table names)
+    diff_table_level(old_ddl, new_ddl, "mysql")
+
 
 ## Supported Statements
 
@@ -596,6 +622,16 @@ The format is based on Keep a Changelog 1.0.0, and this project adheres to Seman
 ### Fixed
 - None.
 
+## [1.14.0] - 2026-11-18
+### Added
+- New `simple_ddl_parser.diff` module with `diff_ddls(old_ddl, new_ddl, dialect)` that compares two DDL scripts and returns a difference report: added/removed tables, column-level changes (added/removed columns, type/default/nullable changes with old and new values), and index/constraint changes (added/removed/changed, where same-name definition changes are reported separately). The report includes migration statements for the target dialect (`mysql` or `mssql`), ordered as: drop indexes/constraints, alter columns, add columns, add indexes/constraints. `diff_tables(...)` filters the report to a given list of tables, and `diff_table_level(...)` returns only table-level changes. All three are also exported from the package root.
+
+### Changed
+- None.
+
+### Fixed
+- None.
+
 ## [1.13.0] - 2026-03-29
 ### Added
 - None.
@@ -791,7 +827,8 @@ The format is based on Keep a Changelog 1.0.0, and this project adheres to Seman
 
 Older versions are documented in ARCHIVE_CHANGELOG.txt.
 
-[Unreleased]: https://github.com/xnuinside/simple-ddl-parser/compare/1.13.0...HEAD
+[Unreleased]: https://github.com/xnuinside/simple-ddl-parser/compare/1.14.0...HEAD
+[1.14.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.13.0...1.14.0
 [1.13.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.12.0...1.13.0
 [1.12.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.11.0...1.12.0
 [1.11.0]: https://github.com/xnuinside/simple-ddl-parser/compare/1.10.0...1.11.0
