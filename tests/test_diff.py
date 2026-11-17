@@ -2,7 +2,7 @@
 
 import pytest
 
-from simple_ddl_parser.diff import diff_ddls
+from simple_ddl_parser.diff import diff_ddls, diff_table_level, diff_tables
 from simple_ddl_parser.ddl_parser import DDLParserError
 
 
@@ -38,9 +38,7 @@ class TestTableLevel:
         assert report["tables"]["changed"] == []
 
     def test_schema_prefix_normalized(self):
-        report = diff_ddls(
-            "", "CREATE TABLE `dbo`.`Orders` (id INT);", "mssql"
-        )
+        report = diff_ddls("", "CREATE TABLE `dbo`.`Orders` (id INT);", "mssql")
         added = report["tables"]["added"][0]
         assert added["name"] == "dbo.orders"
         assert added["schema"] == "dbo"
@@ -75,9 +73,10 @@ class TestColumnLevel:
         old = "CREATE TABLE users (id INT);"
         new = "CREATE TABLE users (id BIGINT);"
         columns = _changed_columns(diff_ddls(old, new, "mysql"))
-        assert columns["changed"] == [
-            {"column": "id", "changes": {"type": {"old": "INT", "new": "BIGINT"}}}
-        ]
+        assert len(columns["changed"]) == 1
+        change = columns["changed"][0]
+        assert change["column"] == "id"
+        assert change["changes"] == {"type": {"old": "INT", "new": "BIGINT"}}
 
     def test_type_size_change(self):
         old = "CREATE TABLE users (name VARCHAR(50));"
@@ -209,14 +208,8 @@ class TestConstraintLevel:
         assert [c["constraint"] for c in constraints["removed"]] == ["uq_name"]
 
     def test_changed_constraint_is_separate_from_add_remove(self):
-        old = (
-            "CREATE TABLE users (a INT, b INT, "
-            "CONSTRAINT uq_ab UNIQUE (a));"
-        )
-        new = (
-            "CREATE TABLE users (a INT, b INT, "
-            "CONSTRAINT uq_ab UNIQUE (a, b));"
-        )
+        old = "CREATE TABLE users (a INT, b INT, " "CONSTRAINT uq_ab UNIQUE (a));"
+        new = "CREATE TABLE users (a INT, b INT, " "CONSTRAINT uq_ab UNIQUE (a, b));"
         constraints = _changed_table(diff_ddls(old, new, "mysql"))["constraints"]
         assert constraints["added"] == []
         assert constraints["removed"] == []
@@ -244,3 +237,145 @@ class TestConstraintLevel:
         ]
         assert [c["constraint"] for c in constraints["added"]] == ["fk_user"]
         assert constraints["added"][0]["category"] == "references"
+
+
+class TestStatements:
+    def test_mysql_modify_combines_type_and_default(self):
+        old = "CREATE TABLE users (name VARCHAR(50) DEFAULT 'a');"
+        new = "CREATE TABLE users (name VARCHAR(100) NOT NULL DEFAULT 'b');"
+        statements = diff_ddls(old, new, "mysql")["statements"]
+        assert statements == [
+            "ALTER TABLE users MODIFY COLUMN name VARCHAR(100) " "NOT NULL DEFAULT 'b';"
+        ]
+
+    def test_mssql_splits_type_and_default(self):
+        old = "CREATE TABLE users (name VARCHAR(50) DEFAULT 'a');"
+        new = "CREATE TABLE users (name VARCHAR(100) NOT NULL DEFAULT 'b');"
+        statements = diff_ddls(old, new, "mssql")["statements"]
+        assert statements == [
+            "ALTER TABLE users ALTER COLUMN name VARCHAR(100) NOT NULL;",
+            "ALTER TABLE users ADD DEFAULT 'b' FOR name;",
+        ]
+
+    def test_statement_order_drop_alter_add(self):
+        old = (
+            "CREATE TABLE users (id INT, old_col INT, name VARCHAR(50), "
+            "INDEX idx_old (old_col));"
+        )
+        new = (
+            "CREATE TABLE users (id INT, name VARCHAR(100), extra INT, "
+            "INDEX idx_name (name));"
+        )
+        statements = diff_ddls(old, new, "mysql")["statements"]
+        assert statements == [
+            "ALTER TABLE users DROP INDEX idx_old;",
+            "ALTER TABLE users DROP COLUMN old_col;",
+            "ALTER TABLE users MODIFY COLUMN name VARCHAR(100);",
+            "ALTER TABLE users ADD COLUMN extra INT;",
+            "ALTER TABLE users ADD INDEX idx_name (name);",
+        ]
+
+    def test_mysql_drop_and_add_constraint(self):
+        old = "CREATE TABLE users (a INT, b INT, " "CONSTRAINT uq_ab UNIQUE (a));"
+        new = "CREATE TABLE users (a INT, b INT, " "CONSTRAINT uq_ab UNIQUE (a, b));"
+        statements = diff_ddls(old, new, "mysql")["statements"]
+        assert statements == [
+            "ALTER TABLE users DROP INDEX uq_ab;",
+            "ALTER TABLE users ADD CONSTRAINT uq_ab UNIQUE (a, b);",
+        ]
+
+    def test_mssql_drop_and_add_constraint(self):
+        old = "CREATE TABLE users (a INT, b INT, " "CONSTRAINT uq_ab UNIQUE (a));"
+        new = "CREATE TABLE users (a INT, b INT, " "CONSTRAINT uq_ab UNIQUE (a, b));"
+        statements = diff_ddls(old, new, "mssql")["statements"]
+        assert statements == [
+            "ALTER TABLE users DROP CONSTRAINT uq_ab;",
+            "ALTER TABLE users ADD CONSTRAINT uq_ab UNIQUE (a, b);",
+        ]
+
+    def test_mssql_index_statements(self):
+        old = "CREATE TABLE users (a INT, INDEX idx_a (a));"
+        new = "CREATE TABLE users (a INT, b INT, INDEX idx_b (b));"
+        statements = diff_ddls(old, new, "mssql")["statements"]
+        assert statements == [
+            "DROP INDEX idx_a ON users;",
+            "ALTER TABLE users ADD b INT;",
+            "CREATE INDEX idx_b ON users (b);",
+        ]
+
+    def test_added_table_create_statement(self):
+        report = diff_ddls(
+            "", "CREATE TABLE users (id INT NOT NULL, PRIMARY KEY (id));", "mysql"
+        )
+        assert report["statements"] == [
+            "CREATE TABLE users (\n" "  id INT NOT NULL,\n" "  PRIMARY KEY (id)\n" ");"
+        ]
+
+    def test_removed_table_drop_statement(self):
+        report = diff_ddls("CREATE TABLE users (id INT);", "", "mysql")
+        assert report["statements"] == ["DROP TABLE users;"]
+
+    def test_schema_qualified_table_in_statements(self):
+        old = "CREATE TABLE dbo.users (id INT);"
+        new = "CREATE TABLE dbo.users (id BIGINT);"
+        statements = diff_ddls(old, new, "mssql")["statements"]
+        assert statements == ["ALTER TABLE dbo.users ALTER COLUMN id BIGINT NULL;"]
+
+    def test_no_changes_no_statements(self):
+        ddl = "CREATE TABLE users (id INT);"
+        assert diff_ddls(ddl, ddl, "mysql")["statements"] == []
+
+
+class TestFilters:
+    old = (
+        "CREATE TABLE users (id INT, name VARCHAR(50));\n"
+        "CREATE TABLE orders (id INT, total INT);"
+    )
+    new = (
+        "CREATE TABLE users (id INT, name VARCHAR(100));\n"
+        "CREATE TABLE orders (id INT, total INT);\n"
+        "CREATE TABLE logs (id INT);"
+    )
+
+    def test_diff_tables_filters_report(self):
+        report = diff_tables(self.old, self.new, "mysql", ["users"])
+        assert [t["name"] for t in report["tables"]["changed"]] == ["users"]
+        assert report["tables"]["added"] == []
+        assert report["statements"] == [
+            "ALTER TABLE users MODIFY COLUMN name VARCHAR(100);"
+        ]
+
+    def test_diff_tables_added_table(self):
+        report = diff_tables(self.old, self.new, "mysql", ["logs"])
+        assert [t["name"] for t in report["tables"]["added"]] == ["logs"]
+        assert report["tables"]["changed"] == []
+        assert len(report["statements"]) == 1
+        assert report["statements"][0].startswith("CREATE TABLE logs")
+
+    def test_diff_tables_ignores_unknown_names(self):
+        report = diff_tables(self.old, self.new, "mysql", ["nope", "users"])
+        assert [t["name"] for t in report["tables"]["changed"]] == ["users"]
+
+    def test_diff_tables_matches_schema_qualified_filter(self):
+        old = "CREATE TABLE dbo.users (id INT);"
+        new = "CREATE TABLE dbo.users (id BIGINT);"
+        report = diff_tables(old, new, "mssql", ["users"])
+        assert [t["name"] for t in report["tables"]["changed"]] == ["dbo.users"]
+        report = diff_tables(old, new, "mssql", ["dbo.users"])
+        assert [t["name"] for t in report["tables"]["changed"]] == ["dbo.users"]
+
+    def test_diff_table_level(self):
+        report = diff_table_level(self.old, self.new, "mysql")
+        assert report == {
+            "dialect": "mysql",
+            "tables": {
+                "added": ["logs"],
+                "removed": [],
+                "changed": ["users"],
+            },
+        }
+
+    def test_diff_table_level_removed(self):
+        report = diff_table_level(self.new, self.old, "mysql")
+        assert report["tables"]["removed"] == ["logs"]
+        assert report["tables"]["changed"] == ["users"]

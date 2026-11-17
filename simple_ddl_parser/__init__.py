@@ -4,6 +4,7 @@ from simple_ddl_parser.ddl_parser import (
     SimpleDDLParserException,
     parse_from_file,
 )
+from simple_ddl_parser.diff import diff_ddls, diff_table_level, diff_tables
 from simple_ddl_parser.output.dialects import dialect_by_name
 from simple_ddl_parser.output.custom_schemas import (
     list_custom_output_schemas,
@@ -20,4 +21,7 @@ __all__ = [
     "SimpleDDLParserException",
     "register_custom_output_schema",
     "list_custom_output_schemas",
+    "diff_ddls",
+    "diff_table_level",
+    "diff_tables",
 ]
