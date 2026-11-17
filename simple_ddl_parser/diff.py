@@ -125,6 +125,68 @@ def _build_report(old_ddl: str, new_ddl: str, dialect: str) -> Dict:
     return report
 
 
+def _column_type_repr(column: Dict) -> str:
+    """Render a column type with its size, e.g. ``VARCHAR(100)``."""
+    base = str(column.get("type") or "").strip()
+    size = column.get("size")
+    if size is None or size == "":
+        return base
+    if isinstance(size, (list, tuple)):
+        return f"{base}({', '.join(str(part) for part in size)})"
+    return f"{base}({size})"
+
+
+def _normalize_type_repr(type_repr: str) -> str:
+    return " ".join(type_repr.split()).lower()
+
+
+def _normalize_default(value) -> Optional[str]:
+    if value is None:
+        return None
+    return str(value).strip()
+
+
+def _diff_columns(old_columns: List[Dict], new_columns: List[Dict]) -> Dict:
+    """Compare column lists of two versions of one table."""
+    result = _empty_change_groups()
+    old_by_name = {
+        _normalize_identifier(col.get("name")): col for col in old_columns
+    }
+    new_by_name = {
+        _normalize_identifier(col.get("name")): col for col in new_columns
+    }
+
+    for name in new_by_name.keys() - old_by_name.keys():
+        result["added"].append(new_by_name[name])
+    for name in old_by_name.keys() - new_by_name.keys():
+        result["removed"].append(old_by_name[name])
+
+    for name in sorted(old_by_name.keys() & new_by_name.keys()):
+        old_col, new_col = old_by_name[name], new_by_name[name]
+        changes = {}
+
+        old_type = _column_type_repr(old_col)
+        new_type = _column_type_repr(new_col)
+        if _normalize_type_repr(old_type) != _normalize_type_repr(new_type):
+            changes["type"] = {"old": old_type, "new": new_type}
+
+        old_default = _normalize_default(old_col.get("default"))
+        new_default = _normalize_default(new_col.get("default"))
+        if old_default != new_default:
+            changes["default"] = {"old": old_default, "new": new_default}
+
+        old_nullable = bool(old_col.get("nullable", True))
+        new_nullable = bool(new_col.get("nullable", True))
+        if old_nullable != new_nullable:
+            changes["nullable"] = {"old": old_nullable, "new": new_nullable}
+
+        if changes:
+            result["changed"].append(
+                {"column": new_col.get("name"), "changes": changes}
+            )
+    return result
+
+
 def _diff_table(
     key: Tuple[Optional[str], Optional[str]], old: Dict, new: Dict
 ) -> Optional[Dict]:
@@ -133,7 +195,7 @@ def _diff_table(
         "name": _display_name(key),
         "schema": key[0],
         "table": key[1],
-        "columns": _empty_change_groups(),
+        "columns": _diff_columns(old.get("columns", []), new.get("columns", [])),
         "indexes": _empty_change_groups(),
         "constraints": _empty_change_groups(),
     }

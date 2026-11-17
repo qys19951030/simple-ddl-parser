@@ -49,3 +49,93 @@ class TestTableLevel:
     def test_unsupported_dialect_raises(self):
         with pytest.raises(DDLParserError):
             diff_ddls("", "", "oracle")
+
+
+def _changed_columns(report, table="users"):
+    changed = {t["table"]: t for t in report["tables"]["changed"]}
+    return changed[table]["columns"]
+
+
+class TestColumnLevel:
+    def test_added_column(self):
+        old = "CREATE TABLE users (id INT);"
+        new = "CREATE TABLE users (id INT, name VARCHAR(50));"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        assert [c["name"] for c in columns["added"]] == ["name"]
+        assert columns["removed"] == []
+        assert columns["changed"] == []
+
+    def test_removed_column(self):
+        old = "CREATE TABLE users (id INT, name VARCHAR(50));"
+        new = "CREATE TABLE users (id INT);"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        assert [c["name"] for c in columns["removed"]] == ["name"]
+
+    def test_type_change(self):
+        old = "CREATE TABLE users (id INT);"
+        new = "CREATE TABLE users (id BIGINT);"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        assert columns["changed"] == [
+            {"column": "id", "changes": {"type": {"old": "INT", "new": "BIGINT"}}}
+        ]
+
+    def test_type_size_change(self):
+        old = "CREATE TABLE users (name VARCHAR(50));"
+        new = "CREATE TABLE users (name VARCHAR(100));"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        assert columns["changed"][0]["changes"]["type"] == {
+            "old": "VARCHAR(50)",
+            "new": "VARCHAR(100)",
+        }
+
+    def test_type_case_difference_is_not_a_change(self):
+        old = "CREATE TABLE users (name varchar(50));"
+        new = "CREATE TABLE users (name VARCHAR(50));"
+        report = diff_ddls(old, new, "mysql")
+        assert report["tables"]["changed"] == []
+
+    def test_default_change(self):
+        old = "CREATE TABLE users (status INT DEFAULT 0);"
+        new = "CREATE TABLE users (status INT DEFAULT 1);"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        assert columns["changed"][0]["changes"]["default"] == {
+            "old": "0",
+            "new": "1",
+        }
+
+    def test_default_added_and_removed(self):
+        old = "CREATE TABLE users (status INT);"
+        new = "CREATE TABLE users (status INT DEFAULT 0);"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        assert columns["changed"][0]["changes"]["default"] == {
+            "old": None,
+            "new": "0",
+        }
+        columns = _changed_columns(diff_ddls(new, old, "mysql"))
+        assert columns["changed"][0]["changes"]["default"] == {
+            "old": "0",
+            "new": None,
+        }
+
+    def test_nullable_change(self):
+        old = "CREATE TABLE users (name VARCHAR(50));"
+        new = "CREATE TABLE users (name VARCHAR(50) NOT NULL);"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        assert columns["changed"][0]["changes"]["nullable"] == {
+            "old": True,
+            "new": False,
+        }
+
+    def test_multiple_changes_on_one_column(self):
+        old = "CREATE TABLE users (name VARCHAR(50) DEFAULT 'a');"
+        new = "CREATE TABLE users (name VARCHAR(100) NOT NULL DEFAULT 'b');"
+        columns = _changed_columns(diff_ddls(old, new, "mysql"))
+        changes = columns["changed"][0]["changes"]
+        assert changes["type"] == {"old": "VARCHAR(50)", "new": "VARCHAR(100)"}
+        assert changes["default"] == {"old": "'a'", "new": "'b'"}
+        assert changes["nullable"] == {"old": True, "new": False}
+
+    def test_identical_tables_produce_no_changes(self):
+        ddl = "CREATE TABLE users (id INT, name VARCHAR(50));"
+        report = diff_ddls(ddl, ddl, "mysql")
+        assert report["tables"]["changed"] == []
